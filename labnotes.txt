@@ -1,0 +1,515 @@
+The following documents all the required steps that a System Administrator has to perform in
+order to complete the tasks below as stated in /r/linuxadmin subreddit for the purpose of
+learning how to conduct common System Administrator work.
+
+Link:https://www.reddit.com/r/linuxadmin/comments/2s924h/how_did_you_get_your_start/cnnw1ma/
+
+TasksI:
+1)Set up a KVM hypervisor.
+
+2)Inside of that KVM hypervisor, install a Spacewalk server. Use CentOS 6 as the distro for 
+all work below. (For bonus points, set up errata importation on the CentOS channels, so you 
+can properly see security update advisory information.)
+
+3)Create a VM to provide named and dhcpd service to your entire environment. Set up the dhcp 
+daemon to use the Spacewalk server as the pxeboot machine (thus allowing you to use Cobbler 
+to do unattended OS installs). Make sure that every forward zone you create has a reverse zone 
+associated with it. Use something like "internal.virtnet" (but not ".local") as your internal 
+DNS zone.
+
+4)Use that Spacewalk server to automatically (without touching it) install a new pair of OS 
+instances, with which you will then create a Master/Master pair of LDAP servers. Make sure 
+they register with the Spacewalk server. Do not allow anonymous bind, do not use unencrypted 
+LDAP.
+
+5)Reconfigure all 3 servers to use LDAP authentication.
+
+6)Create two new VMs, again unattendedly, which will then be Postgresql VMs. Use pgpool-II 
+to set up master/master replication between them. Export the database from your Spacewalk 
+server and import it into the new pgsql cluster. Reconfigure your Spacewalk instance to run 
+off of that server.
+
+7)Set up a Puppet Master. Plug it into the Spacewalk server for identifying the inventory it 
+will need to work with. (Cheat and use ansible for deployment purposes, again plugging into 
+the Spacewalk server.)
+
+8)Deploy another VM. Install iscsitgt and nfs-kernel-server on it. Export a LUN and an NFS 
+share.
+
+9)Deploy another VM. Install bakula on it, using the postgresql cluster to store its database.
+Register each machine on it, storing to flatfile. Store the bakula VM's image on the iscsi 
+LUN, and every other machine on the NFS share.
+
+10)Deploy two more VMs. These will have httpd (Apache2) on them. 
+Leave essentially default for now.
+
+11)Deploy two more VMs. These will have tomcat on them. Use JBoss Cache to replicate the 
+session caches between them. Use the httpd servers as the frontends for this. 
+The application you will run is JBoss Wiki.
+
+12)You guessed right, deploy another VM. This will do iptables-based NAT/round-robin 
+loadbalancing between the two httpd servers.
+
+13)Deploy another VM. On this VM, install postfix. Set it up to use a gmail account to 
+allow you to have it send emails, and receive messages only from your internal network.
+
+14)Deploy another VM. On this VM, set up a Nagios server. Have it use snmp to monitor the 
+communication state of every relevant service involved above. This means doing a "is the 
+rightport open" check, and a "I got the right kind of response" check and "We still have 
+filesysteImspace free" check.
+
+15I)Deploy another VM. On this VM, set up a syslog daemon to listen to every other server's 
+input. Reconfigure each other server to send their logging output to various files on the 
+syslog server. (For extra credit, set up logstash or kibana or greylog to parse those logs.)
+
+16)Document every last step you did in getting to this point in your brand new Wiki.
+
+17)Now go back and create Puppet Manifests to ensure that every last one of these machines 
+is authenticating to the LDAP servers, registered to the Spacewalk server, and backed up by 
+the bakula server.
+
+18)Now go back, reference your documents, and set up a Puppet Razor profile that hooks into 
+each of these things to allow you to recreate, from scratch, each individual server.
+
+19)Destroy every secondary machine you've created and use the above profile to recreate them,
+joining them to the clusters as needed.
+
+20)Bonus exercise: create three more VMs. A CentOS 5, 6, and 7 machine. On each of these 
+machines, set them up to allow you to create custom RPMs and import them into the Spacewalk 
+server instance. Ensure your Puppet configurations work for all three and produce 
+like-for-like behaviors.
+
+
+From this point and untill the end of this documentation each task will be referenced in the
+the TASK<X> Format, where <X> stands for the corresponding number.Each Task section will be 
+further seperated into logical subsections based on the conducted work to succeed in the task.
+
+Any section designated as [Under-Construction] still requires documentation.
+
+TASK1
+
+Host OS choice and Installation
+
+The host OS of choice is CentOS 7 (which will also be the OS choice for all other machines 
+unless another OS is specified). 
+The minimal ISO was chosen to get only the basic packages and install any other required 
+packages based on needs.
+
+Allocated Space		Partition	Notes
+9.1G			/				
+4.5G			/home
+201G			/var		VM Images stored here
+16G			/swap		1:1 with RAM
+618M			/boot/efi	Uefi
+Some unallocated space was left during the creation of the partitions
+
+During installation a user was created and assigned as administrator (member of wheel group)
+
+
+Network Configuration
+
+For the purpose of this lab , the router that acts as the default gateway for the network has had it's dhcp service disabled. 
+
+To allow the host machine to act as a router for the clients , a bridge interface was created and the the ethernet interface was modified accordingly in /etc/sysconfig/network-scripts
+
+First, ip forwarding had to be allowed in the kernel parameters. This was done by running
+	echo "net.ipv4.ip_forward = 1"|sudo tee /etc/sysctl.d/99-ipforward.conf
+	sudo sysctl -p /etc/sysctl.d/99-ipforward.conf
+
+
+Then the ifcfg-en4s0 was modifed:
+
+TYPE=Ethernet
+PROXY_METHOD=none
+BROWSER_ONLY=no
+BOOTPROTO=static
+DEFROUTE=yes
+IPV4_FAILURE_FATAL=no
+IPV6INIT=yes
+IPV6_AUTOCONF=yes
+IPV6_DEFROUTE=yes
+IPV6_FAILURE_FATAL=no
+IPV6_ADDR_GEN_MODE=stable-privacy
+NAME=enp4s0
+UUID=c33e0e3c-1ed8-44d5-890a-669fa775de5c
+DEVICE=enp4s0
+ONBOOT=yes
+ZONE=public
+BRIDGE=virbr0
+
+And the ifcfg-virbr0 was created:
+
+DEVICE="virbr0"
+TYPE=BRIDGE
+ONBOOT=yes
+BOOTPROTO=static
+IPADDR="192.168.1.3"
+NETMASK="255.255.255.0"
+GATEWAY="192.168.1.1"
+DNS1="192.168.1.1"
+DNS2="0.0.0.0"
+
+The machine's hostname was set to madao with the command 
+	hostnamectl set-hostname madao
+
+The machine's domain name and fqdn was set to vmnet.org and madao.vmnet.org by appending the 
+line 
+	127.0.0.1 madao.vmnet.org madao 
+in /etc/hosts . This was done as a workaround because RedHat recommends that the hostname 
+matches the fqdn.
+
+
+Installing a Graphical Interface
+
+In order to ease the process of finding and reading online resources and to also allow for theKVM gui manager to work (more on that later) a Graphical Interface was required. 
+A firefox browser was also installed but the procedure is out of the scope of the document.
+
+To install a graphical interface:
+	yum groupinstall "X Window System"
+	yum install gnome-classic-session gnome-terminal nautilus-open-terminal control-center 		liberation-mono-fonts
+	unlink /etc/systemd/system/default.target
+	ln -sf /lib/systemd/system/graphical.target /etc/systemd/system/default.target
+
+
+Installing KVM
+
+Check if the CPU supports Hardware Virtualization:
+	grep -E '(vmx|svm)' /proc/cpuinfo
+
+Install KVM and all associated packages:
+	yum install qemu-kvm qemu-img virt-manager libvirt libvirt-python libvirt-client 
+	virt-install virt-viewer bridge-utils
+
+Start and enable libvirtd service:
+	systemctl start libvirtd
+	systemctl enable libvirtd
+
+Start a vm on host machine startup
+	sudo virsh --connect qemu:///system autostart vmdeb7
+Where vmdeb7 is the name of the client.
+
+
+Task2
+
+Installing and Configuring Spacewalk Server
+
+The installation of the Spacewalk Server is done by following the installation guide found on
+https://github.com/spacewalkproject/spacewalk/wiki/HowToInstall
+
+For this particular host machine the following steps were replicated:
+
+Install spacewalk-repo package
+	
+Red Hat Enterprise Linux 7, Scientific Linux 7, CentOS 7
+	rpm -Uvh https://copr-be.cloud.fedoraproject.org/results/@spacewalkproject/spacewalk-2.8/epel-7-x86_64/00736372-spacewalk-repo/spacewalk-repo-2.8-11.el7.centos.noarch.rpm
+
+Install additional repos & packages
+
+	EPEL7
+	rpm -Uvh https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+
+	Java Packages
+	(cd /etc/yum.repos.d && curl -O https://copr.fedorainfracloud.org/coprs/g/spacewalkproject/java-packages/repo/epel-7/group_spacewalkproject-java-packages-epel-7.repo)
+
+PostgreSQL server, set up by Spacewalk(embedded)
+	yum -y install spacewalk-setup-postgresql
+
+Installing Specewalk
+This will pull down and install the set of RPMs required to get Spacewalk to run.
+	yum -y install spacewalk-postgresql
+
+Configuring the firewall
+
+Provide access to all ports specified in spacewalk documentation
+
+firewall-cmd --permanent --add-port=80/tcp ; firewall-cmd --permanent --add-port=443/tcp
+firewall-cmd --permanent --add-port=5222/tcp ; firewall-cmd --permanent --add-port=5269/tcp ; firewall-cmd --permanent --add-port=69/udp
+
+
+Configuring the Spacewalk Application
+
+For default PostgreSql database run:
+	spacewalk-setup
+
+An example configuration session:
+
+# spacewalk-setup
+* Setting up SELinux..
+** Database: Setting up database connection for PostgreSQL backend.
+** Database: Installing the database:
+** Database: This is a long process that is logged in:
+** Database:   /var/log/rhn/install_db.log
+*** Progress: #
+** Database: Installation complete.
+** Database: Populating database.
+*** Progress: #####################################
+* Configuring tomcat.
+* Setting up users and groups.
+** GPG: Initializing GPG and importing key.
+** GPG: Creating /root/.gnupg directory
+You must enter an email address.
+Admin Email Address? root@localhost
+* Performing initial configuration.
+* Configuring apache SSL virtual host.
+Should setup configure apache's default ssl server for you (saves original ssl.conf) [Y]? 
+** /etc/httpd/conf.d/ssl.conf has been backed up to ssl.conf-swsave
+* Configuring jabberd.
+* Creating SSL certificates.
+CA certificate password? 
+Re-enter CA certificate password?
+Cname alias of the machine (comma seperated)?
+Organization? Fedora
+Organization Unit [spacewalk.server.com]? Spacewalk Unit
+Email Address [root@localhost]? 
+City? Brno
+State? CZ
+Country code (Examples: "US", "JP", "IN", or type "?" to see a list)? CZ
+** SSL: Generating CA certificate.
+** SSL: Deploying CA certificate.
+** SSL: Generating server certificate.
+** SSL: Storing SSL certificates.
+* Deploying configuration files.
+* Update configuration in database.
+* Setting up Cobbler..
+Cobbler requires tftp and xinetd services be turned on for PXE provisioning functionality. Enable these services [Y]? 
+* Restarting services.
+Installation complete.
+Visit https://spacewalk.server.com to create the Spacewalk administrator account.
+
+Configuring Spacewalk with an Answer File
+
+You can also configure Spacewalk by using an answer file, by running spacewalk-setup like
+
+spacewalk-setup --answer-file=<FILENAME>
+
+For PostgreSQL, you need to create something like this:
+
+admin-email = root@localhost
+ssl-set-cnames = spacewalk2
+ssl-set-org = Spacewalk Org
+ssl-set-org-unit = spacewalk
+ssl-set-city = My City
+ssl-set-state = My State
+ssl-set-country = US
+ssl-password = spacewalk
+ssl-set-email = root@localhost
+ssl-config-sslvhost = Y
+db-backend=postgresql
+db-name=spaceschema
+db-user=spaceuser
+db-password=spacepw
+db-host=localhost
+db-port=5432
+enable-tftp=Y
+
+After spacewalk-setup is complete your application is ready to go!
+
+
+Set up errata importation on the CentOS channels [Under Construction]
+
+
+Task3
+
+Create a vm
+
+Start the virt-manager (requires sudo)
+	virt-manager
+
+Select the create new vm button and follow the steps. For this particular vm the, installing 
+the OS from a downloaded minimal CentOS 7 ISO was specified. 
+
+hostname dhcpserver && fqdn dhcpserver.vmnet.org , following the method described above
+Partition scheme was set to auto
+A Static IP was provided
+
+	
+Configuring DNS Server on CentOS 7 VM
+
+Install Bind package
+	yum -y install bind bind-utils
+
+Configure Bind
+
+#Configuration file of bind is /etc/named.conf
+
+Commenting out the following lines, will enable BIND to listen on all ip addresses.
+	#listen-on port 53 { 127.0.0.1; };
+	#listen-on-v6 port 53 { ::1; };
+
+Add the labs network in the following line
+	allow-query     { localhost;192.168.1.0/24; };
+
+#In case of a slave server <IP address> we need to transfer all zones add the following line
+	allow-transfer { <IP address>; };
+
+Create a forward zone entry:
+	zone "vmnet.org" IN { #Domain Name
+	type master; #Indicates Primary DNS, slave would be the alternative
+	file "fwd.vmnet.org.db"; #Forward lookup file
+	allow-update { none; }; #None because it is the Primary DNS
+	};
+
+Create a reverse zone entry:
+	zone "1.168.192.in-addr.arpa" IN { #Reverse lookup name
+	type master;
+	file "1.168.192.db"; #Reverse lookup file
+	allow-update { none; };
+	};
+
+Create the zone files (Missing the created files from documentation)
+Each created zone in /etc/named.conf requires a lookup file placed under /var/named/
+#All domain names in the zone files should end with a dot (.)
+
+Configuring the firewall
+
+Open ports 53/tcp and 53/udp on DNS server
+	firewall-cmd --permanent --zone=public --add-port=53/tcp
+	firewall-cmd --permanent --zone=public --add-port=53/udp
+
+Restart firewalld Service
+	systemctl restart firewalld
+	
+
+
+Restart and enable named.service
+	systemctl restart named.service
+	systemctl enable named.service
+
+
+Troubleshooting named permission issues
+
+During attempts to restart the named service, the service failed, the solution was found in 
+https://www.centos.org/forums/viewtopic.php?t=53358
+
+The following is an excrement of the above thread describing the solution
+
+sealert -a /var/log/audit/audit.log | less
+
+SELinux is preventing named-checkconf from open access on file /var/named/reverse.home
+
+	If you want to fix the label.
+	/var/named/reverse.home default label should be named_zone_t.
+	Then you can run restorecon.
+	Do
+	# /sbin/restorecon -v /var/named/reverse.home
+
+audit2allow -w -a
+
+	Missing type enforcement (TE) allow rule.
+	You can use audit2allow to generate a loadable module to allow this access.
+
+However, this isn't fixing the label, this is creating an allow rule, and
+who knows what other files can be allowed with this permission. Let's try to
+change the label first. 
+
+chcon -t named_zone_t /var/named/reverse.home
+semanage fcontext -a -t named_zone_t "/var/named/reverse.home"
+
+Which temporarily changes the label absolutely. The `semanage` will make the
+change permanent.
+
+Solution - To change it based on it's location in the filesystem hierarchy: 
+
+	restorecon -v /var/named/reverse.home
+	restorecon -v /var/named/forward.home
+
+Using the above restorecon command on the forward and reverse zone files resolved issue.
+
+Adding a DNS Server ip address to clients
+
+Visit any client machine and add a DNS server ip address in /etc/resolv.conf
+search vmnet.org
+nameserver 192.168.1.4
+
+If Network Manager manages the networking then place the following
+DNS1=192.168.1.4 # In /etc/sysconfig/network-scripts/ifcfg-eXX file
+
+
+Configuring a DHCP server on CentOS 7 VM
+
+First install the dhcp package:
+	sudo yum -y install dhcp
+
+The configuration file of dhcp is by default in /etc/dhcp/dhcpd.conf
+An example file can be found on /usr/share/doc/dhcp-4.2.5/dhcpd.conf.example
+
+Copy the example file:
+	cp /usr/share/doc/dhcp-4.2.5/dhcpd.conf.example /etc/dhcp/dhcpd.conf
+
+Edit the dhcpd.conf:
+	vim /etc/dhcp/dhcpd.conf
+
+First set some global parameters:
+
+	option domain-name "vmnet.org";
+	option domain-name-servers dhcpserver.vmnet.org;
+	default-lease-time 3600; 
+	max-lease-time 7200;
+	authoritative;
+
+#Make sure to comment/delete anything else in the file since its was copied from an example
+
+Next define a subnetwork within dhcpd.conf (example shows multiple ways):
+
+subnet 192.168.1.0 netmask 255.255.255.0 {
+        option routers                  192.168.1.4;
+        option subnet-mask              255.255.255.0;
+        option domain-search            "vmnet.org";
+        option domain-name-servers      192.168.1.4;
+        range   192.168.1.5   192.168.56.100;
+}
+
+Write and Quit
+
+# chown :dhcpd /etc/dhcp/dhcpd.conf to make dhcpd group owner of the file
+
+Open port 67/udp on firewalld so the daemon can communicate
+	firewall-cmd --permanent --zone=public --add-port=67/udp
+
+# restart firewall to refresh port list by running systemctl restart firewalld
+
+Start and enable dhcpd
+	systemctl start dhcpd
+	systemctl enable dhcpd
+
+DHCP service should be active now
+
+Clients that want to communicate with the dhcp service should have their ethernet interface
+modified by setting BOOTPROTO="dhcp"
+
+
+Configure 'next-server' and 'filename' options in DHCP server
+
+These options will need to be configured so that the dhcp daemon can use the Specawalk server
+as the pxeboot machine. Add the following lines in the global options in /etc/dhcp/dhcpd.conf
+	
+	next-server 192.168.1.3; #Spacewalk server hosting TFTP
+	filename "/pxelinux.0"; # full path on TFTP server: /var/lib/tftpboot/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
